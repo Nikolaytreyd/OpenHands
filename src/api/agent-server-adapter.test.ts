@@ -48,6 +48,14 @@ function getPlannerAgentContextSkillNames(payload: {
   return payload.agent.agent_context?.skills?.map((skill) => skill.name) ?? [];
 }
 
+function getPlannerAgentContextSkills(payload: {
+  agent: {
+    agent_context?: { skills?: Array<{ name?: string; source?: string }> };
+  };
+}): Array<{ name?: string; source?: string }> {
+  return payload.agent.agent_context?.skills ?? [];
+}
+
 describe("buildStartConversationRequest", () => {
   it("builds a raw planning agent request for local Planner", () => {
     const agentSettings = {
@@ -301,6 +309,97 @@ describe("buildStartConversationRequest", () => {
     });
 
     expect(payload.agent_launch_additions).toBeUndefined();
+  });
+});
+
+describe("buildStartPlanningConversationRequest — skills", () => {
+  const installedSkill = (name: string) => ({
+    name,
+    content: `# ${name} (installed copy)`,
+    source: `/root/.openhands/skills/installed/${name}/SKILL.md`,
+  });
+
+  /**
+   * The planner is the only caller that posts a raw agent spec, so it is the
+   * only one the agent-server's "skills must have unique names" validation can
+   * reject. A skill that is both installed under ~/.openhands/skills and
+   * bundled from @openhands/extensions used to travel twice, and
+   * `POST /api/conversations` answered `422 Duplicate skill name found`.
+   */
+  const buildWithSkills = (
+    skills: Array<{ name: string; content: string; source: string }>,
+    skillEnablement?: { enabledSkills?: string[]; disabledSkills?: string[] },
+  ) =>
+    buildStartPlanningConversationRequest({
+      encryptedAgentSettings: {
+        agent_kind: "openhands",
+        llm: { model: "openhands/minimax-m2.7" },
+        agent_context: { skills },
+      },
+      workingDir: "/workspace/project",
+      parentConversationId: "parent-1",
+      skillEnablement,
+    });
+
+  it("sends an installed catalog skill once, keeping the installed copy", () => {
+    const payload = buildWithSkills([installedSkill("add-skill")], {
+      enabledSkills: ["add-skill"],
+    });
+
+    const skills = getPlannerAgentContextSkills(payload);
+    expect(skills.map((skill) => skill.name)).toEqual(["add-skill"]);
+    // Settings-carried skills are authoritative, as in the SDK where explicit
+    // skills win over auto-loaded ones.
+    expect(skills[0].source).toBe(
+      "/root/.openhands/skills/installed/add-skill/SKILL.md",
+    );
+  });
+
+  it("collapses several installed skills that the catalog also bundles", () => {
+    const payload = buildWithSkills(
+      [
+        installedSkill("add-skill"),
+        installedSkill("docker"),
+        installedSkill("github"),
+      ],
+      { enabledSkills: ["add-skill", "docker", "github"] },
+    );
+
+    const names = getPlannerAgentContextSkillNames(payload);
+    expect(names).toEqual(["add-skill", "docker", "github"]);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("still adds enabled catalog skills the settings do not carry", () => {
+    const payload = buildWithSkills([installedSkill("docker")], {
+      enabledSkills: ["add-skill"],
+    });
+
+    expect(getPlannerAgentContextSkillNames(payload)).toEqual([
+      "docker",
+      "add-skill",
+    ]);
+  });
+
+  it("drops a disabled skill whether it is installed or bundled", () => {
+    const payload = buildWithSkills([installedSkill("add-skill")], {
+      enabledSkills: ["add-skill", "docker"],
+      disabledSkills: ["add-skill", "docker"],
+    });
+
+    expect(getPlannerAgentContextSkillNames(payload)).not.toContain(
+      "add-skill",
+    );
+    expect(getPlannerAgentContextSkillNames(payload)).not.toContain("docker");
+  });
+
+  it("keeps duplicate names out of the payload even if settings repeat one", () => {
+    const payload = buildWithSkills(
+      [installedSkill("add-skill"), installedSkill("add-skill")],
+      { enabledSkills: ["add-skill"] },
+    );
+
+    expect(getPlannerAgentContextSkillNames(payload)).toEqual(["add-skill"]);
   });
 });
 

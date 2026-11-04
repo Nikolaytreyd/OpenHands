@@ -899,6 +899,43 @@ function buildBundledSkills(): BundledSkill[] {
   });
 }
 
+/**
+ * Merge the skills the settings already carry with the bundled catalog.
+ *
+ * The same skill is routinely named twice: installing a catalog skill copies it
+ * into `~/.openhands/skills/installed/`, which the settings surface as
+ * `agent_context.skills`, while the catalog keeps bundling its own copy. The
+ * agent-server validates `agent_context.skills` for unique names and rejects the
+ * payload with `422 Duplicate skill name found: <name>`, so the two lists have
+ * to be merged here rather than concatenated.
+ *
+ * Settings-carried skills win on a collision, mirroring the SDK, where explicit
+ * skills are authoritative and auto-loaded ones only fill gaps. Skills without
+ * a string name are kept as-is: they are someone else's validation problem, and
+ * dropping them would hide a malformed skill from the agent.
+ */
+function mergeAgentContextSkills(
+  existingSkills: SettingsRecord[],
+  bundledSkills: BundledSkill[],
+  isSkillEnabled: (skillName: string) => boolean,
+): Array<SettingsRecord | BundledSkill> {
+  const merged = new Map<string, SettingsRecord | BundledSkill>();
+  let unnamed = 0;
+  for (const skill of existingSkills) {
+    const key =
+      typeof skill.name === "string"
+        ? skill.name
+        : `unnamed-skill-${unnamed++}`;
+    merged.set(key, skill);
+  }
+  for (const skill of bundledSkills) {
+    if (isSkillEnabled(skill.name) && !merged.has(skill.name)) {
+      merged.set(skill.name, skill);
+    }
+  }
+  return [...merged.values()];
+}
+
 function buildAgentContext(
   agentSettings: SettingsRecord,
   enablement: SkillEnablement = {},
@@ -918,13 +955,14 @@ function buildAgentContext(
   // snapshot of ~60 skills, so a deny-list puts every future addition into
   // every system prompt (OpenHands#16302). Skills the agent context already
   // carries are user-authored and stay opt-out.
-  const mergedSkills = [
-    ...existingSkills.filter(
+  const mergedSkills = mergeAgentContextSkills(
+    existingSkills.filter(
       (skill) =>
         typeof skill.name !== "string" || !disabledSkillNames.has(skill.name),
     ),
-    ...buildBundledSkills().filter((skill) => isSkillEnabled(skill.name)),
-  ];
+    buildBundledSkills(),
+    isSkillEnabled,
+  );
 
   return {
     ...existingContext,
